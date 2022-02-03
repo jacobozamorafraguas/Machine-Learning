@@ -1,0 +1,949 @@
+---
+title: "Lab_2_1. Classification: Logistic Regression - kNN"
+subtitle: Machine Learning
+output:
+  html_document: 
+    toc: true
+  pdf_document: default
+  word_document: 
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+## Load libraries 
+
+
+```{r message=FALSE}
+library(caret)
+library(tidyverse)
+library(ROCR) #for plotting ROC curves.
+library(caret)
+library(ggplot2)
+library(MLTools)
+
+#Decision tree libraries
+library(rpart)
+library(rpart.plot)
+library(partykit)
+```
+
+## Set working directory 
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+# Data Loading and Preprocessing
+
+## Step 1: Import the data
+
+
+```{r}
+Diabetes <- read.csv("~/OneDrive - Universidad Pontificia Comillas/master/MachineLearning/Rprogramming/P2_1_LogReg_KNN/Diabetes.csv", sep=";")
+Diabetes
+glimpse(Diabetes)
+summary(Diabetes)
+```
+## Step 2: check for missing values.
+
+Using the `naniar` library:
+```{r}
+naniar::n_miss(Diabetes) 
+```
+Alternative:  use `map` to apply a function to each column:
+```{r}
+Diabetes %>% 
+      map(.f = ~ which(is.na(.x)))
+```
+```{r}
+all(complete.cases(Diabetes))
+```
+Either way, we conclude that there are no missing values in the data.
+
+## Step 3 : Encode the categorical variables as factors.
+
+Using `mutate` (and remember that you need an assignment here):
+```{r}
+Diabetes <- Diabetes %>% 
+  mutate(DIABETES = as_factor(DIABETES))
+#Diabetes <- Diabetes %>% 
+#  mutate(GLUCOSE = as_factor(GLUCOSE))
+glimpse(Diabetes)
+```
+
+## Step 4: Plot the data and check out for outliers.
+
+Use `ggplot` to get a scatterplot of the data with color linked to the output variable:
+```{r fig.align='center', out.width = "85%"}
+ggplot(Diabetes) + 
+  geom_point(aes(x = GLUCOSE, y = PREGNANT, color = DIABETES))
+ggplot(Diabetes) + 
+  geom_point(aes(x = GLUCOSE, y = BLOODPRESS, color = DIABETES))
+ggplot(Diabetes) + 
+  geom_point(aes(x = GLUCOSE, y = BODYMASSINDEX, color = DIABETES))
+
+ Diabetes%>% 
+  filter(GLUCOSE == 0)
+ 
+ #Diabetes2 <- Diabetes%>% 
+  #filter(BODYMASSINDEX != 0, GLUCOSE != 0, BLOODPRESS!=0)
+ 
+require(naniar)
+Diabetes %>% 
+  summarise(across(.cols = where(~ n_miss(.x) > 0), .fns = ~ n_miss(.x)))
+
+# Missing data: using filter
+Diabetes <- Diabetes %>%
+  filter(GLUCOSE > 0, BLOODPRESS > 0, SKINTHICKNESS > 0, INSULIN > 0, BODYMASSINDEX > 0, PEDIGREEFUNC > 0, AGE >= 21)
+str(Diabetes)
+```
+
+## Step 5 : Analyze the continuous variables (feature selection).
+
+
+From the above plot we may guess that the boundary between the two output classes is non.linear. On the other hand, note thar the scales of `X1` and `X2` are similar. Below we will see how to perform the centering and scaling of the variables.
+
+The above plot also shows that there is no obvious collinearity between the predictors `X1, X2`. But sometimes it is a good idea to look at a *plot matrix* of variable pairs in our data set to spot possible relations between them.
+```{r fig.align='center', out.width = "85%"}
+#For datasets with more than two inputs
+library(GGally)
+ggpairs(Diabetes,aes(color = DIABETES, alpha = 0.3))
+```
+
+In this case the plot confirms our previous ideas and also shows that the class balance for the outcome variable is really good in this data. 
+
+The `PlotDataframe` function in the MLTools library produces multiple plots between the output of a data frame and the predictors of this output.
+
+```{r fig.align='center', out.width = "85%"}
+# Function for plotting multiple plots between the output of a data frame
+# and the predictors of this output.
+PlotDataframe(fdata = Diabetes, 
+              output.name = "DIABETES")
+
+```
+
+
+## Step 7: Split the data-set into Training, Validation and Test Sets.
+
+We will use `caret` to divide the data in two sets: *training* and *test* . In order to guarantee replication we use a fixed seed for the random number generator:
+
+```{r}
+set.seed(150)
+```
+
+Now we create a random 80/20 split of the data (in percentage). The `createDataPartition` function creates proportional partitions:
+```{r}
+trainIndex <- createDataPartition(Diabetes$DIABETES, # output variable. 
+                                  p = 0.8,      # split probability for training
+                                  list = FALSE, # avoid output as a list
+                                  times = 1)    # only one partition
+```
+This `trainIndex` indicates which rows in the data table belong to the training set. For example see the first six elements:
+```{r}
+ head(trainIndex)
+```
+
+Thus we can use this index to obtain training and test sets
+```{r}
+fTR <- Diabetes[trainIndex, ]
+fTS <- Diabetes[-trainIndex, ]
+```
+Note that the overall class distribution of the data is preserved
+```{r}
+table(fTR$DIABETES) 
+table(fTS$DIABETES)
+```
+And plots of the training and testing set confirm that:
+```{r fig.align='center', out.width = "85%"}
+library(gridExtra)
+p1 = ggplot(fTR) + geom_point(aes(x = BODYMASSINDEX, y = GLUCOSE, color = DIABETES)) +
+  ggtitle("Training")
+p2 = ggplot(fTS) + geom_point(aes(x = BODYMASSINDEX, y = GLUCOSE, color = DIABETES)) +
+  ggtitle("Test")
+
+gridExtra::grid.arrange(p1, p2, nrow=1, ncol=2)
+```
+
+
+## Validation Techniques
+
+We use the `caret::trainControl` function to implement cross-validation with 10 folds:
+```{r}
+
+ctrl <- trainControl(method = "cv",                        
+                     # Number of folds
+                     number = 10,                          
+                     # Performance summary for comparing models in hold-out samples.
+                     summaryFunction = defaultSummary,
+                     # Compute class probs in hold-out samples
+                     classProbs = TRUE)                    
+```
+Use the Environment pane in RStudio to explore this `ctrl` object.
+
+# Model Training
+
+## Logistic Regression Model, first version.
+
+We begin by training a simple logistic regression model with a linear dependence on both variables:
+
+The `train` function in caret is the main tool for fitting mpdels to data:
+```{r}
+
+fTR<- fTR %>% 
+  mutate(DIABETES = factor(DIABETES, labels = make.names(levels(DIABETES))))
+
+# Model formula in R syntax
+LogReg.fit <- train(form = DIABETES ~ .,
+                   # Training dataset
+                   data = fTR,
+                   # Select a logistic regression model
+                   method = "glm",
+                   # Center an scale inputs
+                   preProcess = c("center","scale"), 
+                   # call the trainControl Object created before
+                   trControl = ctrl,
+                   # summary metric for hyperparameter selection
+                   metric = "Accuracy")
+
+```
+
+Let us explore the fit object:
+```{r}
+LogReg.fit
+```
+For detailed information about any R model we resort to `summary`:
+```{r}
+summary(LogReg.fit)
+```
+And for complete (but less structured) information we use `str` or the Environment pane in RStudio. The output of the following command has been omitted here:
+```{r eval=FALSE, comment=NULL}
+str(LogReg.fit)
+```
+
+This logistic model gives us the chance to explore the way that the folds are reflected in the fit object. To see the train and control indexes for each fold:
+
+```{r}
+str(LogReg.fit$control$index)       #Training indexes
+```
+
+
+```{r}
+str(LogReg.fit$control$indexOut)    #Test indexes
+```
+And the performace measures for each fold are in this `list`: 
+```{r}
+LogReg.fit$resample                 #Resample test results
+```
+We can use a boxplot to visualize these measures: 
+```{r fig.align='center', out.width = "85%"}
+# typeof(LogReg.fit$resample)
+fit_resamples <- as_tibble(LogReg.fit$resample) 
+
+p1 <- ggplot(fit_resamples, aes(y = Accuracy)) + 
+  geom_boxplot() + 
+  geom_jitter(aes(x = 0, color =  Resample), width = 0.1)
+p2 <- ggplot(fit_resamples, aes(y = Kappa)) + 
+  geom_boxplot() + 
+  geom_jitter(aes(x = 0, color =  Resample), width = 0.1)
+ggpubr::ggarrange(p1, p2, nrow=1, ncol=2, common.legend = TRUE, legend="right")
+```
+Or using base R plots:
+```{r}
+par(mfrow = c(1, 2))
+boxplot(LogReg.fit$resample$Accuracy, 
+        xlab = "Accuracy", 
+        main="")
+boxplot(LogReg.fit$resample$Kappa, 
+        xlab = "Kappa", 
+        main="")
+par(mfrow = c(1, 1))
+```
+### Model predictions and evaluation
+
+To get the predicted outputs from our model we unsurprisingly use the `predict` function. keep in mind that there are two types of predictions: probabilities (soft) and class (hard). We get firstget both types of predictions for each row in the training set and we create a new with the train data and  these predictions as new columns (using `mutate`). Not ethe use of the dot here. This is dplyr syntas for the output of the previous pipe :
+```{r}
+#fTR_eval <- fTR %>% 
+#  mutate(LRprob = predict(LogReg.fit, type="prob", newdata = .),
+ #        LRpred = predict(LogReg.fit, type="raw", newdata = .))
+
+
+fTR_eval <- fTR
+
+fTR_eval$LRprob <- predict(LogReg.fit, type="prob", newdata = fTR) # predict probabilities
+fTR_eval$LRpred <- predict(LogReg.fit, type="raw", newdata = fTR) # predict classes 
+
+levels(fTR_eval$LRpred) <- list("0"="X0","1"="X1")
+levels(fTR_eval$DIABETES) <- list("0"="X0","1"="X1")
+str(fTR_eval)
+```
+See the resulting table:
+```{r}
+fTR_eval %>% 
+  slice_head(n = 4)
+```
+Note also the LRprob column is a data.frame column containing the probabilities for both classes. These are the first four rows:
+```{r}
+fTR_eval$LRprob %>% 
+  slice_head(n = 4)
+```
+
+Now we can do the same for the test set:
+```{r}
+#fTS_eval <- fTS %>% 
+#  mutate(LRprob = predict(LogReg.fit, type="prob", newdata = fTS),
+#         LRpred = predict(LogReg.fit, type="raw", newdata = fTS))
+
+
+
+fTS_eval <- fTS
+
+fTS_eval$LRprob <- predict(LogReg.fit, type="prob", newdata = fTS) # predict probabilities
+fTS_eval$LRpred <- predict(LogReg.fit, type="raw", newdata = fTS) # predict classes 
+
+levels(fTS_eval$LRpred) <- list("0"="X0","1"="X1")
+str(fTR_eval)
+```
+
+It is convenient to see aplot of the predicted class for both the training and test set. We use color and shape to identify missclassified data points in these plots:
+```{r fig.align='center', out.width = "85%"}
+ggplot(fTR_eval) + 
+  geom_point(aes(x = BODYMASSINDEX, y = GLUCOSE, 
+                 color = LRpred, shape = DIABETES)) + 
+  labs(title = "Predictions for training data")
+```
+
+Thus *blue circles* and *red triangles* indicate misclassified data points.
+
+```{r fig.align='center', out.width = "85%"}
+ggplot(fTS_eval) + 
+  geom_point(aes(x = BODYMASSINDEX, y = GLUCOSE, 
+                 color = LRpred, 
+                 shape = DIABETES)) + 
+  labs(title = "Predictions for test data")
+```
+
+The `Plot2DClass` function offers a better alternative:
+```{r fig.align='center', out.width = "85%"}
+#Plot classification in a 2 dimensional space
+Plot2DClass(fTR, #Dataframe with input variables
+            fTR$DIABETES,     #Output variable
+            LogReg.fit,#Fitted model with Caret
+            var1 = "AGE", var2 = "GLUCOSE", #variables that define x and y axis
+            selClass = "YES")     #Class output to be analyzed 
+```
+
+### Performance measures for this model
+
+As we have seen in theory the confusion matrix is a good satrting point for many performance assesments of the model. Let us get those matrices for both the training and test data:
+
+```{r}
+# Training
+
+confusionMatrix(data = fTR_eval$LRpred, #Predicted classes
+                reference = fTR_eval$DIABETES, #Real observations
+                positive = "1") #Class labeled as Positive
+```
+
+
+```{r}
+# Test
+confusionMatrix(fTS_eval$LRpred, 
+                fTS_eval$DIABETES, 
+                positive = "1" )
+```
+The `PlotClassPerformance` function in the `MLTools` library displays several useful plots to analyze the performance of the model. Again let us use it for both the training and testing sets:
+
+```{r fig.align='center', out.width = "85%"}
+#fTReval1<- fTR_eval %>% 
+ # mutate(across(.cols = LRprob,.fns = as.factor))
+#lo de arriba es una prueba
+
+PlotClassPerformance(fTR_eval$DIABETES,       #Real observations
+                     fTR_eval$LRprob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed
+
+```
+
+```{r fig.align='center', out.width = "85%"}
+PlotClassPerformance(fTS_eval$DIABETES,       # Real observations
+                     fTS_eval$LRprob,  # predicted probabilities
+                     selClass = "X1") # Class to be analyzed
+```
+
+## Logistic Regression Model, second version with `X1` variable squared.
+
+In Machine Learning it is usual practice to compare more than one type of model for a problem, in order to select the best performing one. Previously, when we looked at the plot of the data we thought that a linear boundary between classes in the `X1, X2` plane was probabbly not a good enough idea. So now we consider another logistic regression model in which we include a quadratic term in `X1`. We take this opportunity to show how to reorder columns using dplyr:
+
+```{r}
+Diabetes <- Diabetes %>% 
+  mutate(BODYMASSINDEXsq = BODYMASSINDEX^2) %>% 
+  relocate(BODYMASSINDEXsq, .after = BODYMASSINDEX)
+
+Diabetes
+```
+We update the train and test set with this new column:
+```{r}
+fTR <- Diabetes[trainIndex, ]
+fTS <- Diabetes[-trainIndex, ]
+```
+
+And now we quickly repeat the above modeling and performance analysis steps. Let us train the model:
+```{r}
+fTR<- fTR %>% 
+  mutate(DIABETES = factor(DIABETES, labels = make.names(levels(DIABETES))))
+
+LogReg2.fit <- train(form = DIABETES ~ .,
+                   data = fTR,
+                   method = "glm",
+                   preProcess = c("center","scale"), 
+                   trControl = ctrl,
+                   metric = "Accuracy")              
+
+```
+Note that the function call is the same, thanks to the R formula syntax
+
+Let us see the summary of the fitted model:
+```{r}
+summary(LogReg2.fit) 
+```
+Add the predicted probabilities and classes for both training and test. **Warning:** for the final model comaprison we will be looking at the predictions from all the fitted models. Therefore we add these predictions to the table that already contains the predictions from the previous logistic model. In order to do that we also need to incoirporsate the squared values of `X1`:
+```{r}
+fTR_eval <- fTR_eval %>% 
+  mutate(BODYMASSINDEXsq = BODYMASSINDEX^2) %>% 
+  relocate(BODYMASSINDEXsq, .after = BODYMASSINDEX) %>% 
+  mutate(
+        LRprob2 = predict(LogReg2.fit, type="prob", newdata = .),
+         LRpred2 = predict(LogReg2.fit, type="raw", newdata = .))
+
+levels(fTR_eval$LRpred2) <- list("0"="X0","1"="X1")
+```
+
+
+```{r}
+fTS_eval <- fTS_eval %>% 
+  mutate(BODYMASSINDEXsq = BODYMASSINDEX^2) %>% 
+  relocate(BODYMASSINDEXsq, .after = BODYMASSINDEX) %>% 
+  mutate(LRprob2 = predict(LogReg2.fit, type="prob", newdata = .),
+         LRpred2 = predict(LogReg2.fit, type="raw", newdata = .))
+
+levels(fTS_eval$LRpred2) <- list("0"="X0","1"="X1")
+```
+Again, note that we are using essentially the same commands as before.
+
+Plot summary of the classification result. In this case we select the variables to plot in order to see the result in the `X1, X2` plane.  
+```{r}
+Plot2DClass(fTR, # Dataframe with input variables 
+            fTR$DIABETES,     # Output variable
+            LogReg2.fit,# Fitted model with caret
+            var1 = "BODYMASSINDEX", var2 = "GLUCOSE", # variables to represent the plot
+            selClass = "11")     # Class output to be analyzed 
+```
+
+```{r}
+Plot2DClass(fTS, # Dataframe with input variables 
+            fTS$DIABETES,     # Output variable
+            LogReg2.fit,# Fitted model with caret
+            var1 = "AGE", var2 = "GLUCOSE", # variables to represent the plot
+            selClass = "1")     # Class output to be analyzed 
+```
+
+### Performance measures for this model:
+
+Confusion matrix for training:
+```{r}
+confusionMatrix(data = fTR_eval$LRpred2, #Predicted classes
+                reference = fTR_eval$DIABETES, #Real observations
+                positive = "1") #Class labeled as Positive
+```
+
+Confusion matrix for test:
+```{r}
+confusionMatrix(fTS_eval$LRpred2, 
+                fTS_eval$DIABETES, 
+                positive = "1")
+```
+
+Classification performance plots:
+
+For training:
+```{r}
+PlotClassPerformance(fTR_eval$DIABETES,       # Real observations
+                     fTR_eval$LRprob2,  # Predicted probabilities
+                     selClass = "X1") # Class to be analyzed
+```
+
+For test:
+```{r}
+PlotClassPerformance(fTS_eval$DIABETES,       # Real observations
+                     fTS_eval$LRprob2,  # Predicted probabilities
+                     selClass = "X1") # Class to be analyzed)
+```
+
+## KNN Model
+
+For our last choice of model we turn to the knn algorithm. This type of model contains a hyperparameter, the number k of neighbors used to classify a point. We could train the model with a fixed value of k, but it is better if we ask caret to explore a range of values of k, in order to select the best performing value. 
+
+```{r}
+#formula for specifying inputs and outputs.
+knn.fit <- train(form = DIABETES ~ BODYMASSINDEX + GLUCOSE, 
+                 # Training dataset 
+                data = fTR, 
+                # Select the knn model
+                method = "knn",
+                # Centering and scaling
+                preProcess = c("center","scale"),
+                # tuneGrid = data.frame(k = 5),
+                # tuneLength = 10,
+                tuneGrid = data.frame(k = seq(3,115,4)),
+                trControl = ctrl, 
+                # performance metric
+                metric = "Accuracy")
+```
+
+Some basic information about the fit for the different values of k in the tuning grid:
+```{r}
+knn.fit
+```
+
+In this case we can see a nice graphic summary of the way that caret selects the hyperparameter value for k:
+```{r}
+ggplot(knn.fit) #plot the summary metric as a function of the tuning parameter
+```
+
+And to access the final model for the chosen value of k:
+```{r}
+knn.fit$finalModel #information about final model trained
+```
+As we did with the previous models, now we add the predicted probabilities and classes for both training and test:
+```{r}
+fTR_eval <- fTR_eval %>%
+  mutate(knn_prob = predict(knn.fit, type="prob", newdata = .),
+         knn_pred = predict(knn.fit, type="raw", newdata = .))
+
+levels(fTR_eval$knn_pred) <- list("0"="X0","1"="X1")
+```
+
+
+```{r}
+fTS_eval <- fTS_eval %>% 
+  mutate(knn_prob = predict(knn.fit, type="prob", newdata = .),
+         knn_pred = predict(knn.fit, type="raw", newdata = .))
+
+levels(fTS_eval$knn_pred) <- list("0"="X0","1"="X1")
+```
+
+Plot of the classification:
+
+```{r}
+Plot2DClass(fTS, #Dataframe with input variables of the model
+            fTS$DIABETES,     #Output variable
+            knn.fit,#Fitted model with caret
+            var1 = "BODYMASSINDEX", var2 = "GLUCOSE", #variables that define x and y axis
+            selClass = "YES")     #Class output to be analyzed 
+
+```
+
+### Performance measures for this model:
+
+Confusion matrices
+
+For training:
+```{r}
+confusionMatrix(data = fTR_eval$knn_pred, #Predicted classes
+                reference = fTR_eval$DIABETES, #Real observations
+                positive = "1") #Class labeled as Positive
+```
+
+and test:
+```{r}
+confusionMatrix(fTS_eval$knn_pred, 
+                fTS_eval$DIABETES, 
+                positive = "1")
+```
+
+Classification performance plots:
+
+For training
+```{r}
+PlotClassPerformance(fTR_eval$DIABETES,       #Real observations
+                     fTR_eval$knn_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed
+```
+
+and test:
+```{r}
+PlotClassPerformance(fTS_eval$DIABETES,       #Real observations
+                     fTS_eval$knn_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed)
+```
+
+# Model comparison
+
+After fitting three different models to the same training and data sets  we wish to compare the performance of these models. 
+
+First we compare how well they did on the training set. Recall that in caret `resamples` provides a list pf performance measures for each fold in the validation set. Now we combine that information from the three models as follows:
+```{r}
+transformResults <- resamples(list(lr = LogReg.fit, lr2 = LogReg2.fit, knn = knn.fit ))
+summary(transformResults)
+dotplot(transformResults)
+```
+
+Numerically, we can access the global values of accuracy for each model like this:
+
+Logistic version 1
+```{r}
+confusionMatrix(fTR_eval$LRpred, fTR_eval$DIABETES, positive = "1")$overall[1]
+```
+
+Logistic version 2 with `X1^2`
+```{r}
+confusionMatrix(fTR_eval$LRpred2, fTR_eval$DIABETES, positive = "1")$overall[1]
+```
+
+knn 
+```{r}
+confusionMatrix(fTR_eval$knn_pred, fTR_eval$DIABETES, positive = "1")$overall[1]
+```
+
+We can also use a joint plot of the ROC curves for each model to compare them. Note the `add = TRUE` option in the two last plots in order to combine them into a single plot:
+```{r}
+#ROC curve
+library(pROC)
+reducedRoc <- roc(response = fTR_eval$DIABETES, fTR_eval$LRprob$X1)
+plot(reducedRoc, col="black")
+auc(reducedRoc)
+reducedRoc <- roc(response = fTR_eval$DIABETES, fTR_eval$LRprob2$X1)
+plot(reducedRoc, add=TRUE, col="red")
+auc(reducedRoc)
+reducedRoc <- roc(response = fTR_eval$DIABETES, fTR_eval$knn_prob$X1)
+plot(reducedRoc, add=TRUE, col="green")
+auc(reducedRoc)
+legend("bottomright", legend=c("LR", "LR2","knn"), col=c("black", "red","green"), lwd=2)
+```
+
+#-------------------------------------------------------------------------------------------------
+#---------------------------- DECISION TREE ------------------------------------------------------
+#-------------------------------------------------------------------------------------------------
+```{r}
+library(rpart)
+library(rpart.plot)
+library(partykit)
+set.seed(150) #For replication
+```
+#Train decision tree
+#rpart contains 1 tuning parameter cp (Complexity parameter). Three options:
+#  - Train with a fixed parameter: tuneGrid = data.frame(cp = 0.1),
+#  - Try with a range of values specified in tuneGrid: tuneGrid = data.frame(cp = seq(0,0.4,0.05))),
+#  - Caret chooses 10 values: tuneLength = 10,
+
+#NOTE: Formula method could be used, but it will automatically create dummy variables. 
+# Decision trees can work with categorical variables as theey are. Then, x and y arguments are used
+```{r}
+tree.fit <- train(x = fTR[,c(1:9)],  #Input variables.
+                 y = fTR$DIABETES,   #Output variable
+                 method = "rpart",   #Decision tree with cp as tuning parameter
+                 control = rpart.control(minsplit = 5,  # Minimum number of obs in node to keep cutting
+                                        minbucket = 5,  # Minimum number of obs in a terminal node
+                                        cp=0), 
+                 parms = list(split = "gini"),          # impuriry measure
+                 #tuneGrid = data.frame(cp = 0.025), # TRY this: tuneGrid = data.frame(cp = 0.25),
+                 #tuneLength = 10,
+                 tuneGrid = data.frame(cp = seq(0,0.05,0.0005)),
+                 trControl = ctrl, 
+                 metric = "Accuracy")
+```
+
+```{r}
+tree.fit #information about the resampling settings
+```
+
+```{r}
+ggplot(tree.fit) #plot the summary metric as a function of the tuning parameter
+#summary(tree.fit)  #information about the model trained
+```
+
+```{r}
+tree.fit$finalModel #Cuts performed and nodes. Also shows the number and percentage of cases in each node.
+#Basic plot of the tree:
+plot(tree.fit$finalModel, uniform = TRUE, margin = 0)
+text(tree.fit$finalModel, use.n = TRUE, all = TRUE, cex = .8)
+```
+
+```{r}
+#Advanced plots
+rpart.plot(tree.fit$finalModel, type = 2, fallen.leaves = FALSE, box.palette = "Oranges")
+tree.fit.party <- as.party(tree.fit$finalModel)
+plot(tree.fit.party)
+```
+
+
+```{r}
+#Measure for variable importance
+varImp(tree.fit,scale = FALSE)
+plot(varImp(tree.fit,scale = FALSE))
+```
+
+## Evaluate model --------------------------------------------------------------------------------
+#Evaluate the model with training and test sets
+#training
+```{r}
+fTR_eval$tree_prob <- predict(tree.fit, type="prob", newdata = fTR) # predict probabilities
+fTR_eval$tree_pred <- predict(tree.fit, type="raw", newdata = fTR) # predict classes 
+#test
+fTS_eval$tree_prob <- predict(tree.fit, type="prob", newdata = fTS) # predict probabilities
+fTS_eval$tree_pred <- predict(tree.fit, type="raw", newdata = fTS) # predict classes 
+
+
+
+#Plot classification in a 2 dimensional space
+Plot2DClass(fTR[,1:9], #Input variables of the model
+            fTR$DIABETES,     #Output variable
+            tree.fit,#Fitted model with caret
+            var1 = "BODYMASSINDEX", var2 = "GLUCOSE", #variables that define x and y axis
+            selClass = "YES")     #Class output to be analyzed 
+
+
+## Performance measures --------------------------------------------------------------------------------
+
+#######confusion matices
+# Training
+levels(fTR_eval$tree_pred) <- list("0"="X0","1"="X1")
+
+confusionMatrix(data = fTR_eval$tree_pred, #Predicted classes
+                reference = fTR_eval$DIABETES, #Real observations
+                positive = "1") #Class labeled as Positive
+# test
+levels(fTS_eval$tree_pred) <- list("0"="X0","1"="X1")
+
+confusionMatrix(fTS_eval$tree_pred, 
+                fTS_eval$DIABETES, 
+                positive = "1")
+
+#######Classification performance plots 
+# Training
+PlotClassPerformance(fTR_eval$DIABETES,       #Real observations
+                     fTR_eval$tree_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed
+# test
+PlotClassPerformance(fTS_eval$DIABETES,       #Real observations
+                     fTS_eval$tree_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed)
+```
+
+#-------------------------------------------------------------------------------------------------
+#---------------------------- RANDOM FOREST ------------------------------------------------------
+#-------------------------------------------------------------------------------------------------
+
+```{r}
+
+library(randomForest)
+set.seed(150) #For replication
+#Train decision tree
+#rf contains one tuning parameter mtry: 
+#   the number of variables randomly sampled as candidates at each split.
+#   The ntree argument can be used to specify the number of trees to grow.
+rf.fit <- train(  x = fTR[,1:9],   #Input variables
+                  y = fTR$DIABETES,   #Output variables 
+                  method = "rf", #Random forest
+                  ntree = 200,  #Number of trees to grow
+                  tuneGrid = data.frame(mtry = seq(1,ncol(fTR)-1)),           
+                  tuneLength = 4,
+                  trControl = ctrl, #Resampling settings 
+                  metric = "Accuracy") #Summary metrics
+rf.fit #information about the resampling settings
+ggplot(rf.fit)   
+```
+
+#Measure for variable importance
+```{r}
+varImp(rf.fit,scale = FALSE)
+plot(varImp(rf.fit,scale = FALSE))
+```
+
+## Evaluate model --------------------------------------------------------------------------------
+```{r}
+#training
+fTR_eval$rf_prob <- predict(rf.fit, type="prob", newdata = fTR) # predict probabilities
+fTR_eval$rf_pred <- predict(rf.fit, type="raw", newdata = fTR) # predict classes 
+#Test
+fTS_eval$rf_prob <- predict(rf.fit, type="prob", newdata = fTS) # predict probabilities
+fTS_eval$rf_pred <- predict(rf.fit, type="raw", newdata = fTS) # predict classes 
+```
+
+
+#Plot classification in a 2 dimensional space
+```{r}
+Plot2DClass(fTR[,1:9], #Input variables of the model
+            fTR$DIABETES,     #Output variable
+            rf.fit,#Fitted model with caret
+            var1 = "BODYMASSINDEX", var2 = "GLUCOSE", #variables that define x and y axis
+            selClass = "YES")     #Class output to be analyzed 
+
+```
+
+## Performance measures --------------------------------------------------------------------------------
+
+#######confusion matices
+```{r}
+# Training
+levels(fTR_eval$rf_pred) <- list("0"="X0","1"="X1")
+
+confusionMatrix(data = fTR_eval$rf_pred, #Predicted classes
+                reference = fTR_eval$DIABETES, #Real observations
+                positive = "1") #Class labeled as Positive
+# Validation
+levels(fTS_eval$rf_pred) <- list("0"="X0","1"="X1")
+
+confusionMatrix(fTS_eval$rf_pred, 
+                fTS_eval$DIABETES, 
+                positive = "1")
+```
+
+#######Classification performance plots 
+```{r}
+# Training
+PlotClassPerformance(fTR_eval$DIABETES,       #Real observations
+                     fTR_eval$rf_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed
+```
+
+```{r}
+# Validation
+PlotClassPerformance(fTS_eval$DIABETES,       #Real observations
+                     fTS_eval$rf_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed)
+```
+
+#-------------------------------------------------------------------------------------------------
+#---------------------------- XGBoost ------------------------------------------------------
+#-------------------------------------------------------------------------------------------------
+
+```{r}
+library(xgboost)
+set.seed(150) #For replication
+```
+
+```{r}
+#Parameter tuning
+xgb_grid <- expand.grid(
+  nrounds = 150, #Boosting Iterations
+  eta = 0.3,     #Shrinkage
+  max_depth = 5, #Max Tree Depth
+  gamma = 0,    #Minimum Loss Reduction
+  colsample_bytree=1, #Subsample Ratio of Columns
+  min_child_weight=1, #Minimum Sum of Instance Weight
+  subsample = 0.5    #Subsample Percentage
+)
+```
+
+```{r}
+# train
+xgb.fit = train(
+  x = fTR[,1:9],   #Input variables
+  y = fTR$DIABETES,   #Output variables 
+  #tuneGrid = xgb_grid, #Uncomment to use values previously defined
+  tuneLength = 4, #Use caret tuning
+  method = "xgbTree",
+  trControl = ctrl,
+  metric="Accuracy"
+)
+```
+
+```{r}
+#plot grid
+# helper function for the plots
+tuneplot <- function(x, probs = .90) {
+  ggplot(x) +
+    coord_cartesian(ylim = c(quantile(x$results$RMSE, probs = probs), min(x$results$RMSE))) +
+    theme_bw()
+}
+tuneplot(xgb.fit)
+```
+
+```{r}
+#Measure for variable importance
+varImp(xgb.fit,scale = FALSE)
+plot(varImp(xgb.fit,scale = FALSE))
+```
+
+
+## Evaluate model --------------------------------------------------------------------------------
+```{r}
+#training
+fTR_eval$xgb_prob <- predict(xgb.fit, type="prob", newdata = fTR) # predict probabilities
+fTR_eval$xgb_pred <- predict(xgb.fit, type="raw", newdata = fTR) # predict classes 
+#Test
+fTS_eval$xgb_prob <- predict(xgb.fit, type="prob", newdata = fTS) # predict probabilities
+fTS_eval$xgb_pred <- predict(xgb.fit, type="raw", newdata = fTS) # predict classes 
+```
+
+```{r}
+#Plot classification in a 2 dimensional space
+Plot2DClass(fTR[,1:9], #Input variables of the model
+            fTR$DIABETES,     #Output variable
+            xgb.fit,#Fitted model with caret
+            var1 = "BODYMASSINDEX", var2 = "GLUCOSE", #variables that define x and y axis
+            selClass = "YES")     #Class output to be analyzed 
+```
+
+
+## Performance measures --------------------------------------------------------------------------------
+
+#######confusion matices
+
+```{r}
+# Training
+levels(fTR_eval$xgb_pred) <- list("0"="X0","1"="X1")
+
+confusionMatrix(data = fTR_eval$xgb_pred, #Predicted classes
+                reference = fTR_eval$DIABETES, #Real observations
+                positive = "1") #Class labeled as Positive
+```
+
+```{r}
+# Validation
+
+levels(fTS_eval$xgb_pred) <- list("0"="X0","1"="X1")
+
+confusionMatrix(fTS_eval$xgb_pred, 
+                fTS_eval$DIABETES, 
+                positive = "1")
+
+```
+
+#######Classification performance plots 
+
+```{r}
+# Training
+PlotClassPerformance(fTR_eval$DIABETES,       #Real observations
+                     fTR_eval$xgb_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed
+
+```
+
+```{r}
+# Validation
+PlotClassPerformance(fTS_eval$DIABETES,       #Real observations
+                     fTS_eval$xgb_prob,  #predicted probabilities
+                     selClass = "X1") #Class to be analyzed)
+
+```
+#-------------------------------------------------------------------------------------------------
+#---------------------- COMPARATIVE ANALYSIS ----------------------------------------------
+#-------------------------------------------------------------------------------------------------
+
+## comparison of models in training and validation set --------------------------------------------------------
+
+```{r}
+#resampling summary metric
+transformResults <- resamples(list(tree = tree.fit, rf = rf.fit, xgb = xgb.fit))
+summary(transformResults)
+dotplot(transformResults) #normaly rf are better than classification trees, but as we only have to predictors this is not the case.
+```
